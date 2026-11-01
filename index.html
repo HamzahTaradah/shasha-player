@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html lang="ar">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="strict-origin-when-cross-origin">
+<title>YouTube Bridge Player</title>
+<style>
+  html, body { margin: 0; padding: 0; width: 100%; height: 100%; background: #000; overflow: hidden; }
+  #p, #live { position: absolute; top: 0; left: 0; width: 100%; height: 100%; border: 0; }
+  #live { display: none; }
+</style>
+</head>
+<body>
+<!--
+  جسر عام لمشغّل يوتيوب – صفحة مستقلة تُستضاف على نطاق https حقيقي (مثل GitHub Pages).
+
+  لماذا؟ يوتيوب يرفض تضمين مشغّله داخل تطبيقات التلفاز/سطح المكتب التي تعمل من file://
+  (خطأ 153: لا توجد ترويسة Referer). هذه الصفحة تُحمَّل في iframe داخل أي تطبيق،
+  فيصل الطلب إلى يوتيوب من نطاق حقيقي ويعمل التشغيل.
+
+  طريقتا الاستخدام:
+
+  1) عبر رابط الصفحة فقط (لأي تطبيق، بلا برمجة):
+       player.html?v=VIDEO_ID               مقطع واحد
+       player.html?list=PLAYLIST_ID         قائمة تشغيل يوتيوب
+       player.html?channel=UC...            أحدث مقاطع قناة (قائمة الرفع)
+       player.html?live=UC...               البث المباشر لقناة
+     خيارات إضافية: &controls=1 (إظهار أزرار يوتيوب) &loop=0 &autoplay=0 &hl=ar
+
+  2) عبر postMessage من التطبيق الحاضن (تحكّم كامل):
+       أوامر → الصفحة:  {type:'sk', cmd:'playlist', ids:[...]}
+                         {type:'sk', cmd:'video', id:'...'}
+                         {type:'sk', cmd:'list', list:'PL...'}
+                         {type:'sk', cmd:'uploads', channelId:'UC...'}
+                         {type:'sk', cmd:'live', channelId:'UC...'}
+                         {type:'sk', cmd:'play'|'pause'|'next'|'prev'|'stop'|'mute'|'unmute'}
+                         {type:'sk', cmd:'seek', seconds:120}
+       أحداث → الحاضن:  {type:'sk', ev:'loaded'|'ready'}
+                         {type:'sk', ev:'state', state: -1|0|1|2|3|5}   (قيم YT.PlayerState)
+                         {type:'sk', ev:'title', title:'...', videoId:'...'}
+                         {type:'sk', ev:'error', code: n}
+-->
+<div id="p"></div>
+<iframe id="live" allow="autoplay; encrypted-media"></iframe>
+<script>
+(function () {
+  var q = {};
+  location.search.replace(/^\?/, '').split('&').forEach(function (kv) {
+    if (!kv) return; var i = kv.indexOf('='); var k = decodeURIComponent(i < 0 ? kv : kv.slice(0, i));
+    q[k] = decodeURIComponent(i < 0 ? '' : kv.slice(i + 1).replace(/\+/g, ' '));
+  });
+  function flag(name, def) { return (name in q) ? (q[name] !== '0' && q[name] !== 'false') : def; }
+
+  var player = null, ready = false, queue = [];
+  var live = document.getElementById('live');
+
+  function send(msg) { msg.type = 'sk'; try { window.parent.postMessage(msg, '*'); } catch (e) {} }
+
+  function showLive(channelId) {
+    if (player) try { player.stopVideo(); } catch (x) {}
+    live.src = 'https://www.youtube.com/embed/live_stream?channel=' + encodeURIComponent(channelId) +
+               '&autoplay=1&controls=' + (flag('controls', false) ? 1 : 0) + '&rel=0&modestbranding=1&iv_load_policy=3&hl=' + encodeURIComponent(q.hl || 'ar');
+    live.style.display = 'block';
+    live.onload = function () { send({ ev: 'state', state: 1 }); };
+  }
+  function hideLive() { live.style.display = 'none'; live.src = 'about:blank'; }
+  function isLive() { return live.style.display === 'block'; }
+
+  function handle(m) {
+    if (!m || m.type !== 'sk') return;
+    if (m.cmd === 'live') { showLive(m.channelId); return; }
+    if (!ready) { queue.push(m); return; }
+    try {
+      switch (m.cmd) {
+        case 'playlist': hideLive(); player.loadPlaylist(m.ids, m.index || 0, 0); break;
+        case 'video':    hideLive(); player.loadVideoById(m.id, m.start || 0); break;
+        case 'list':     hideLive(); player.loadPlaylist({ listType: 'playlist', list: m.list }); break;
+        case 'uploads':  hideLive(); player.loadPlaylist({ listType: 'playlist', list: 'UU' + String(m.channelId).slice(2) }); break;
+        case 'play':     if (isLive()) { live.src = live.src; } else player.playVideo(); break;
+        case 'pause':    if (isLive()) { hideLive(); send({ ev: 'state', state: 2 }); } else player.pauseVideo(); break;
+        case 'next':     player.nextVideo(); break;
+        case 'prev':     player.previousVideo(); break;
+        case 'stop':     hideLive(); player.stopVideo(); break;
+        case 'mute':     player.mute(); break;
+        case 'unmute':   player.unMute(); break;
+        case 'seek':     player.seekTo(Number(m.seconds) || 0, true); break;
+      }
+    } catch (e) { send({ ev: 'error', code: -1, detail: String(e) }); }
+  }
+
+  window.onYouTubeIframeAPIReady = function () {
+    player = new YT.Player('p', {
+      width: '100%', height: '100%',
+      playerVars: {
+        autoplay: flag('autoplay', true) ? 1 : 0,
+        controls: flag('controls', false) ? 1 : 0,
+        loop: flag('loop', true) ? 1 : 0,
+        rel: 0, fs: 0, disablekb: 1, iv_load_policy: 3, modestbranding: 1, playsinline: 1, cc_load_policy: 0,
+        hl: q.hl || 'ar', origin: location.origin
+      },
+      events: {
+        onReady: function () {
+          ready = true; send({ ev: 'ready' });
+          // وضع الرابط المباشر
+          if (q.v)            handle({ type: 'sk', cmd: 'video', id: q.v, start: Number(q.t) || 0 });
+          else if (q.list)    handle({ type: 'sk', cmd: 'list', list: q.list });
+          else if (q.channel) handle({ type: 'sk', cmd: 'uploads', channelId: q.channel });
+          else if (q.live)    handle({ type: 'sk', cmd: 'live', channelId: q.live });
+          queue.forEach(handle); queue = [];
+        },
+        onStateChange: function (e) {
+          send({ ev: 'state', state: e.data });
+          if (e.data === YT.PlayerState.PLAYING) {
+            try { var d = player.getVideoData(); send({ ev: 'title', title: (d && d.title) || '', videoId: (d && d.video_id) || '' }); } catch (x) {}
+          }
+          if (e.data === YT.PlayerState.ENDED && flag('loop', true)) { try { player.playVideoAt(0); } catch (x) {} }
+        },
+        onError: function (e) { send({ ev: 'error', code: e.data }); }
+      }
+    });
+  };
+
+  window.addEventListener('message', function (e) { handle(e.data); });
+
+  var s = document.createElement('script');
+  s.src = 'https://www.youtube.com/iframe_api';
+  s.onerror = function () { send({ ev: 'error', code: -2 }); };
+  document.head.appendChild(s);
+  send({ ev: 'loaded' });
+})();
+</script>
+</body>
+</html>
